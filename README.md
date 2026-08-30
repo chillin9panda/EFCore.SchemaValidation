@@ -13,7 +13,7 @@ When teams don't use EF Core migrations and instead manage the database schema m
 | SQL Server | `Microsoft.EntityFrameworkCore.SqlServer` | `dbo` |
 | PostgreSQL | `Npgsql.EntityFrameworkCore.PostgreSQL` | `public` |
 | MySQL / MariaDB | `Pomelo.EntityFrameworkCore.MySql` | database name |
-| SQLite | `Microsoft.EntityFrameworkCore.Sqlite` | *(none)* |
+| SQLite | `Microsoft.EntityFrameworkCore.Sqlite` | `main` |
 
 ## Installation
 
@@ -22,6 +22,10 @@ dotnet add package EFCore.SchemaValidation
 ```
 
 ## Usage
+
+### Basic (Throw on Error)
+
+The default behavior throws an `InvalidOperationException` listing all missing tables and columns.
 
 ```csharp
 using EFCore.SchemaValidation;
@@ -33,25 +37,101 @@ context.ValidateSchema();
 await context.ValidateSchemaAsync(cancellationToken);
 ```
 
-The extension method queries the database schema to verify that every entity in your `DbContext` model has a corresponding table and columns. If anything is missing, it throws an `InvalidOperationException` listing all mismatches.
+### Error Handling Options
 
-### Example: Startup validation
+You can configure how validation errors are handled using the `SchemaValidationOptions` parameter:
+
+```csharp
+context.ValidateSchema(o =>
+{
+    o.OnError = SchemaValidationErrorAction.Throw; // default
+    o.Logger = logger;                             // optional ILogger
+    o.LogFilePath = "/path/to/logfile.log";        // optional, defaults to logs/schema-validation.log
+});
+```
+
+#### `OnError` Modes
+
+| Mode | Behavior |
+|---|---|
+| `Throw` | Throws `InvalidOperationException` (default, backward compatible) |
+| `Log` | Throws `InvalidOperationException` **and** writes a log file with full details |
+| `Page` | Stores the result for the middleware to render an HTML error page. Writes a log file. Does **not** throw. |
+
+### API Projects — Log to File + Crash
+
+For API-only projects, use `Log` mode. The app crashes with a clear error message, and a log file is written with full details:
 
 ```csharp
 using var scope = app.Services.CreateScope();
 var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-dbContext.ValidateSchema();
+
+var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+
+dbContext.ValidateSchema(o =>
+{
+    o.OnError = SchemaValidationErrorAction.Log;
+    o.Logger = logger;
+});
 ```
 
-### Example: Test validation
+When validation fails:
+- An `InvalidOperationException` is thrown with missing tables/columns
+- A log file is written at `logs/schema-validation.log` (relative to app directory)
+- The logger receives a Debug-level message with the full error details
+
+### MVC / Razor Pages — Error Page on Root URL
+
+For MVC projects with Razor Pages, use `Page` mode. When a user visits `/`, they see a styled error page listing missing tables and columns:
 
 ```csharp
-[Fact]
-public void DatabaseSchemaMatchesModel()
+// Program.cs
+using var scope = app.Services.CreateScope();
+var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+dbContext.ValidateSchema(o =>
 {
-    using var context = new AppDbContext();
-    context.ValidateSchema();
-}
+    o.OnError = SchemaValidationErrorAction.Page;
+});
+```
+
+Then register the middleware:
+
+```csharp
+app.UseSchemaValidationPage(); // Only intercepts requests to /
+```
+
+The middleware:
+- Intercepts **only** the root URL (`/`)
+- Renders a styled HTML error page listing missing tables and columns
+- Shows the path to the log file with full details
+- All other URLs (`/api/*`, `/products`, etc.) pass through unaffected
+
+### Both Log + Page
+
+You can combine both — log to file and show the error page:
+
+```csharp
+dbContext.ValidateSchema(o =>
+{
+    o.OnError = SchemaValidationErrorAction.Page;
+    o.Logger = logger;
+});
+```
+
+### Debug Logging
+
+When a logger is provided, validation always logs at `Debug` level regardless of the `OnError` mode:
+
+```csharp
+dbContext.ValidateSchema(o =>
+{
+    o.Logger = logger;
+    o.OnError = SchemaValidationErrorAction.Throw;
+});
+// Debug: "Schema validation passed. All tables and columns match the model."
+// or
+// Debug: "Schema validation issues detected: Schema Validation Failed!..."
 ```
 
 ## Limitations
@@ -67,6 +147,7 @@ public void DatabaseSchemaMatchesModel()
 
 - .NET 6.0, 8.0, or 10.0
 - A supported EF Core relational provider (see [Supported Providers](#supported-providers))
+- For `Page` mode: ASP.NET Core (middleware requires `Microsoft.AspNetCore.App`)
 
 ## License
 

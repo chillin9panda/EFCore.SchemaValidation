@@ -1,6 +1,7 @@
 ﻿using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.Extensions.Logging;
 
 namespace EFCore.SchemaValidation;
 
@@ -20,7 +21,27 @@ public static class SchemaValidation
 
         try
         {
-            Validate(context, connection);
+            Validate(context, connection, null, SchemaValidationErrorAction.Throw);
+        }
+        finally
+        {
+            if (wasClosed) connection.Close();
+        }
+    }
+
+    public static void ValidateSchema(this DbContext context, Action<SchemaValidationOptions> configure)
+    {
+        var options = new SchemaValidationOptions();
+        configure(options);
+
+        var connection = context.Database.GetDbConnection();
+        bool wasClosed = connection.State == System.Data.ConnectionState.Closed;
+
+        if (wasClosed) connection.Open();
+
+        try
+        {
+            Validate(context, connection, options.Logger, options.OnError, options.LogFilePath);
         }
         finally
         {
@@ -37,7 +58,27 @@ public static class SchemaValidation
 
         try
         {
-            await ValidateAsync(context, connection, cancellationToken);
+            await ValidateAsync(context, connection, null, SchemaValidationErrorAction.Throw, null, cancellationToken);
+        }
+        finally
+        {
+            if (wasClosed) await connection.CloseAsync();
+        }
+    }
+
+    public static async Task ValidateSchemaAsync(this DbContext context, Action<SchemaValidationOptions> configure, CancellationToken cancellationToken = default)
+    {
+        var options = new SchemaValidationOptions();
+        configure(options);
+
+        var connection = context.Database.GetDbConnection();
+        bool wasClosed = connection.State == System.Data.ConnectionState.Closed;
+
+        if (wasClosed) await connection.OpenAsync(cancellationToken);
+
+        try
+        {
+            await ValidateAsync(context, connection, options.Logger, options.OnError, options.LogFilePath, cancellationToken);
         }
         finally
         {
@@ -60,7 +101,73 @@ public static class SchemaValidation
         };
     }
 
-    private static void Validate(DbContext context, DbConnection connection)
+    private static void Validate(DbContext context, DbConnection connection, ILogger? logger, SchemaValidationErrorAction onError, string? logFilePath = null)
+    {
+        var result = CollectValidationResult(context, connection);
+
+        if (logger != null)
+        {
+            if (result.IsValid)
+                logger.LogDebug("Schema validation passed. All tables and columns match the model.");
+            else
+                logger.LogDebug("Schema validation issues detected: {ErrorMessage}", result.ErrorMessage);
+        }
+
+        if (onError == SchemaValidationErrorAction.Page)
+        {
+            SchemaValidationMiddleware.ValidationResult = result;
+        }
+
+        if (result.IsValid) return;
+
+        HandleErrors(result, onError, logger, logFilePath);
+    }
+
+    private static async Task ValidateAsync(DbContext context, DbConnection connection, ILogger? logger, SchemaValidationErrorAction onError, string? logFilePath, CancellationToken cancellationToken)
+    {
+        var result = await CollectValidationResultAsync(context, connection, cancellationToken);
+
+        if (logger != null)
+        {
+            if (result.IsValid)
+                logger.LogDebug("Schema validation passed. All tables and columns match the model.");
+            else
+                logger.LogDebug("Schema validation issues detected: {ErrorMessage}", result.ErrorMessage);
+        }
+
+        if (onError == SchemaValidationErrorAction.Page)
+        {
+            SchemaValidationMiddleware.ValidationResult = result;
+        }
+
+        if (result.IsValid) return;
+
+        HandleErrors(result, onError, logger, logFilePath);
+    }
+
+    private static void HandleErrors(SchemaValidationResult result, SchemaValidationErrorAction onError, ILogger? logger, string? logFilePath)
+    {
+        switch (onError)
+        {
+            case SchemaValidationErrorAction.Throw:
+                throw new InvalidOperationException(result.ErrorMessage);
+
+            case SchemaValidationErrorAction.Log:
+                var resolvedLogFilePath = logFilePath ?? result.LogFilePath;
+                result.WriteLog(resolvedLogFilePath);
+                if (logger != null)
+                    logger.LogError("Schema validation failed. Details written to: {LogFilePath}", resolvedLogFilePath);
+                throw new InvalidOperationException(result.ErrorMessage);
+
+            case SchemaValidationErrorAction.Page:
+                var pageLogFilePath = logFilePath ?? result.LogFilePath;
+                result.WriteLog(pageLogFilePath);
+                SchemaValidationMiddleware.ValidationResult = result;
+                break;
+        }
+    }
+
+    private static SchemaValidationResult CollectValidationResult(DbContext context, DbConnection connection)
     {
         var missingTables = new List<string>();
         var missingColumns = new List<string>();
@@ -97,10 +204,11 @@ public static class SchemaValidation
             }
         }
 
-        ThrowIfErrors(missingTables, missingColumns);
+        return SchemaValidationResult.FromErrors(missingTables, missingColumns,
+            Path.Combine(AppContext.BaseDirectory, "logs", "schema-validation.log"));
     }
 
-    private static async Task ValidateAsync(DbContext context, DbConnection connection, CancellationToken cancellationToken)
+    private static async Task<SchemaValidationResult> CollectValidationResultAsync(DbContext context, DbConnection connection, CancellationToken cancellationToken)
     {
         var missingTables = new List<string>();
         var missingColumns = new List<string>();
@@ -137,7 +245,8 @@ public static class SchemaValidation
             }
         }
 
-        ThrowIfErrors(missingTables, missingColumns);
+        return SchemaValidationResult.FromErrors(missingTables, missingColumns,
+            Path.Combine(AppContext.BaseDirectory, "logs", "schema-validation.log"));
     }
 
     private static bool TableExists(DbConnection connection, string schema, string tableName, bool isSqlite)
@@ -249,20 +358,6 @@ public static class SchemaValidation
         }
 
         return columns;
-    }
-
-    private static void ThrowIfErrors(List<string> missingTables, List<string> missingColumns)
-    {
-        if (missingTables.Count == 0 && missingColumns.Count == 0) return;
-
-        var errors = new List<string>();
-        if (missingTables.Count > 0)
-            errors.Add($"Missing Tables: {string.Join(", ", missingTables)}");
-        if (missingColumns.Count > 0)
-            errors.Add($"Missing Columns: {string.Join(", ", missingColumns)}");
-
-        throw new InvalidOperationException(
-            $"Schema Validation Failed!\n{string.Join("\n", errors)}");
     }
 
     private static void AddParameter(DbCommand command, string name, object value)
