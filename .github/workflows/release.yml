@@ -44,8 +44,8 @@ jobs:
 
       - run: dotnet restore
 
-      - run: dotnet build --no-restore
+      - run: dotnet build --no-restore --configuration Release
 
-      - run: dotnet pack src/EFCore.SchemaValidation/EFCore.SchemaValidation.csproj --no-build -p:Version=${GITHUB_REF_NAME#v} -o ./nupkg
+      - run: dotnet pack src/EFCore.SchemaValidation/EFCore.SchemaValidation.csproj --no-build --configuration Release -p:Version=${GITHUB_REF_NAME#v} -o ./nupkg
 
       - run: dotnet nuget push ./nupkg/*.nupkg --source https://api.nuget.org/v3/index.json --skip-duplicate
