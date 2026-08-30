@@ -12,8 +12,7 @@ public class SchemaValidationTests : IDisposable
     {
         foreach (var file in _tempFiles)
         {
-            if (File.Exists(file))
-                File.Delete(file);
+            try { File.Delete(file); } catch (IOException) { }
         }
 
         SchemaValidationMiddleware.ValidationResult = null;
@@ -23,7 +22,7 @@ public class SchemaValidationTests : IDisposable
     {
         var path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.db");
         _tempFiles.Add(path);
-        return $"Data Source={path}";
+        return $"Data Source={path};Pooling=false";
     }
 
     private string CreateTempLogFile()
